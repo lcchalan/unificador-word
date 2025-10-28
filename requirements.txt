@@ -1,4 +1,6 @@
 flask
+gunicorn
 python-docx
 openpyxl
 docxcompose
+setuptools<81
