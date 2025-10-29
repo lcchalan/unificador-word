@@ -42,27 +42,26 @@ def api_headings():
     return jsonify(out)
 
 @app.route("/api/merge", methods=["POST"])
+@app.route("/api/merge", methods=["POST"])
 def api_merge():
-    """
-    Body:
-    {
-      "archivos": [{"name":"x.docx","content":"<base64>"}],
-      "niveles": [1,2,3],
-      "titulos_exactos": ["Introducción","Metodología"],
-      "enforce_whitelist": false   # opcional: activar lista blanca de tu estructura
-    }
-    Respuesta:
-    { "unificado.docx": "<base64>", "tablas.xlsx": "<base64>" }
-    """
     data = request.get_json(force=True, silent=False)
 
-    archivos = []
-    for a in data.get("archivos", []):
-        archivos.append({"name": a["name"], "content": base64.b64decode(a["content"])})
+    archivos = [{"name": a["name"], "content": base64.b64decode(a["content"])}
+                for a in data.get("archivos", [])]
     niveles = data.get("niveles", [1, 2, 3])
     titulos = data.get("titulos_exactos", [])
     enforce_whitelist = bool(data.get("enforce_whitelist", False))
+    group_by_title = bool(data.get("group_by_title", False))
+    group_level = int(data.get("group_level", 1))  # por defecto H1
 
+    if group_by_title:
+        res = procesar_grouped(archivos, group_level, titulos,
+                               enforce_whitelist=enforce_whitelist)
+        # res ya es { "<titulo>.docx": bytes }
+        out = {k: base64.b64encode(v).decode("utf-8") for k, v in res.items()}
+        return jsonify(out)
+
+    # modo clásico (un solo unificado + tablas)
     res = procesar(archivos, niveles, titulos, enforce_whitelist=enforce_whitelist)
     out = {k: base64.b64encode(v).decode("utf-8") for k, v in res.items()}
     return jsonify(out)
