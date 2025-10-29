@@ -63,6 +63,112 @@ def tabla_2d(tbl: Table) -> List[List[str]]:
             row.append((c.text or '').strip())
         out.append(row)
     return out
+def procesar_grouped(archivos: List[Dict], group_level: int,
+                     titulos_objetivo: List[str],
+                     enforce_whitelist: bool = False) -> Dict[str, bytes]:
+    """
+    Genera un DOCX por cada título objetivo (exacto por texto 'base') en el nivel group_level.
+    Ej.: group_level=1 (H1), titulos_objetivo=["A"] -> {"A.docx": bytes}
+
+    Si titulos_objetivo está vacío, agrupa por TODOS los títulos encontrados en ese nivel.
+    No genera Excel; solo los DOCX por título.
+    """
+    # normaliza selección de títulos
+    objetivos_norm = set(base_title(t) for t in titulos_objetivo if (t or '').strip())
+
+    # primero descubrimos todos los títulos candidatos del nivel indicado
+    # y pre-creamos un Composer por cada uno
+    composers: Dict[str, Composer] = {}     # clave: texto base, valor: composer
+    nombres_visibles: Dict[str, str] = {}   # clave: texto base, valor: texto original (bonito) para filename
+
+    def get_or_make_composer(key_norm: str, visible_text: str) -> Composer:
+        if key_norm not in composers:
+            tmp_doc = Document()
+            tmp_stream = io.BytesIO()
+            tmp_doc.save(tmp_stream); tmp_stream.seek(0)
+            composers[key_norm] = Composer(Document(tmp_stream))
+            # guarda el nombre visible (primera vez que aparece)
+            nombres_visibles.setdefault(key_norm, visible_text.strip() or key_norm)
+        return composers[key_norm]
+
+    # 1) recolecta y decide qué títulos vamos a generar
+    all_titles_norm: set = set()
+    sample_visible_for: Dict[str, str] = {}
+    for name, content in [(a['name'], a['content']) for a in archivos if a.get('content')]:
+        bloques = _extraer_bloques(content)
+        for kind, lvl, txt in bloques:
+            if kind == 'h' and lvl == group_level and txt.strip():
+                bt = base_title(txt)
+                if enforce_whitelist and not allowed_by_whitelist(lvl, txt):
+                    continue
+                all_titles_norm.add(bt)
+                sample_visible_for.setdefault(bt, txt)
+
+    # si no se pidió lista específica, usamos todos los títulos encontrados
+    target_keys = objetivos_norm if objetivos_norm else all_titles_norm
+
+    # 2) por cada archivo, extrae los rangos de cada título target y apéndalos en su propio DOCX
+    for name, content in [(a['name'], a['content']) for a in archivos if a.get('content')]:
+        bloques = _extraer_bloques(content)
+        # precalculamos rangos de todos los headings
+        heads = [(i, b) for i, b in enumerate(bloques) if b[0] == 'h']
+        # Para cada título del nivel objetivo:
+        for key in target_keys:
+            # buscamos todas las apariciones del título base en este doc
+            indices = []
+            for idx, b in enumerate(bloques):
+                if b[0] == 'h' and b[1] == group_level and base_title(b[2]) == key:
+                    if enforce_whitelist and not allowed_by_whitelist(b[1], b[2]):
+                        continue
+                    indices.append(idx)
+            if not indices:
+                continue
+
+            # compón un 'part' por cada aparición y apéndalo al Composer de ese título
+            comp = get_or_make_composer(key, sample_visible_for.get(key, key))
+            for i_start in indices:
+                # fin del rango: siguiente heading de igual o menor nivel
+                j_end = len(bloques)
+                for j in range(i_start + 1, len(bloques)):
+                    if bloques[j][0] == 'h' and bloques[j][1] <= group_level:
+                        j_end = j
+                        break
+
+                part = Document()
+                # agrega el heading original
+                h = part.add_heading(level=min(max(group_level, 1), 6))
+                h.add_run(bloques[i_start][2])
+
+                # agrega contenido
+                for b in bloques[i_start + 1:j_end]:
+                    if b[0] == 'p':
+                        part.add_paragraph(b[2])
+                    elif b[0] == 't':
+                        rows = b[2]
+                        if rows and rows[0]:
+                            t = part.add_table(rows=len(rows), cols=len(rows[0]))
+                            for r_i, row in enumerate(rows):
+                                for c_i, val in enumerate(row):
+                                    t.cell(r_i, c_i).text = val
+                comp.append(part)
+
+    # 3) serializa todos los compositores a bytes
+    out: Dict[str, bytes] = {}
+    for key_norm, comp in composers.items():
+        if key_norm not in target_keys:
+            continue
+        nice = sample_visible_for.get(key_norm, key_norm)
+        # crea nombre de archivo seguro
+        safe = re.sub(r'[\\/:*?"<>|]+', '_', nice).strip()
+        if not safe:
+            safe = key_norm or "titulo"
+        filename = f"{safe}.docx"
+        stream = io.BytesIO()
+        comp.doc.save(stream); stream.seek(0)
+        out[filename] = stream.read()
+
+    return out
+
 
 # ---------------------------------------------------------------------
 # (Opcional) Lista blanca basada en tu estructura H1/H2/H3
